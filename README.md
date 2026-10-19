@@ -193,6 +193,6 @@ xcodebuild -scheme TrueDepthReconstruction \
 
 Before publishing changes, run `python3 Tools/audit_publication.py` as well as the tests. The audit enforces the publication file allowlist and checks source for forbidden app/network imports, endpoint literals, credential patterns, and local paths. It supplements manual review; it is not a general secret scanner.
 
-## Source availability
+## License
 
-Copyright © 2026 porarrirr. This is a public source publication with **all rights reserved**; no general reuse, redistribution, or commercial-use license is granted. See [LICENSE](LICENSE). Public visibility does not license the TrueMyFace application, branding, or private assets.
+Copyright © 2026 porarrirr. The code and documentation in this repository are licensed under the [MIT License](LICENSE). The separate TrueMyFace application, branding, private source code, assets, and data are outside the scope of this license.

@@ -193,6 +193,6 @@ xcodebuild -scheme TrueDepthReconstruction \
 
 发布修改之前，除测试外还应执行 `python3 Tools/audit_publication.py`。该检查强制执行公开文件白名单，并检查源码中的禁用应用/网络导入、端点字面量、凭据模式和本地路径。它是人工审核的补充，不是通用秘密扫描器。
 
-## 源码公开与权利
+## 许可证
 
-Copyright © 2026 porarrirr。本仓库为**保留所有权利**的公开源码展示，不授予一般性复用、再分发或商业使用许可。详见 [LICENSE](LICENSE)。仓库公开并不授予对 TrueMyFace 应用、品牌或私有资源的许可。
+Copyright © 2026 porarrirr。本仓库中的代码和文档采用 [MIT 许可证](LICENSE)。独立的 TrueMyFace 应用、品牌、私有源代码、资源和数据不在此许可证的授权范围内。
