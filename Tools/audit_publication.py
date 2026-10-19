@@ -11,6 +11,8 @@ ALLOWED = {
     'Tools/audit_publication.py',
     'Sources/SyntheticDemo/main.swift',
     'Sources/TrueDepthCapture/CaptureFrameSelection.swift',
+    'Sources/TrueDepthCapture/CaptureMotionGate.swift',
+    'Tests/TrueDepthCaptureTests/CaptureMotionGateTests.swift',
     'Sources/TrueDepthCapture/DepthBufferReader.swift',
     'Sources/TrueDepthCapture/DepthForegroundMask.swift',
     'Sources/TrueDepthCapture/TrueDepthScanner.swift',
@@ -52,6 +54,7 @@ EXTRA_IMPORTS = {
     'Sources/TrueDepthCapture/DepthBufferReader.swift': {'CoreVideo'},
     'Sources/TrueDepthCapture/TrueDepthScanner.swift': {'ARKit', 'AVFoundation', 'ImageIO', 'Vision'},
     'Tests/TrueDepthCaptureTests/CaptureFrameSelectionTests.swift': {'TrueDepthCapture'},
+    'Tests/TrueDepthCaptureTests/CaptureMotionGateTests.swift': {'TrueDepthCapture'},
     'Tests/TrueDepthCaptureTests/DepthCaptureInputTests.swift': {'CoreVideo', 'TrueDepthCapture'},
     'Examples/TrueDepthCaptureDemo/CaptureDemoApp.swift': {'SwiftUI', 'TrueDepthCapture'},
 }

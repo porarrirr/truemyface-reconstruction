@@ -133,7 +133,8 @@ final class CaptureOwner {
 - 仅读取被跟踪人脸的**刚体变换和身份**，不读取或使用跟踪器的人脸顶点、拓扑、表情混合形状或形状先验。
 - 将 `capturedDepthData` 转换为以米为单位的 Float32，正确处理行填充；要求绝对度量深度及其自身标定。拒绝缺失、重复、乱序或相差超过 120 ms 的深度时间戳，不假设 RGB 与深度时间戳相同；[Apple 文档说明了两者的不同采样频率](https://developer.apple.com/documentation/arkit/arframe/captureddepthdatatimestamp)。
 - Vision 从对应 RGB 帧提供竖屏 2D 人脸矩形。保守内缩的 2D 椭圆和深度连通前景共同生成掩码，仅裁剪 ROI，不提供三维人脸形状。深度范围为 0.15–0.65 m，中心中位数带宽为 85 mm，相邻像素连续性阈值为 12 mm。
-- 同时最多处理并持有一个相机帧，丢弃多余输入，接受样本至少间隔 250 ms。每方向最多保留两帧，第二帧按角度/时间多样性选择。
+- 同时最多处理并持有一个相机帧，丢弃多余输入；轻量级人脸/相机相对位姿观测仍对丢弃帧执行，防止图像处理背压掩盖运动。接受样本至少间隔 250 ms。每方向最多保留两帧，第二帧按角度/时间多样性选择。竖屏正俯仰角对应 `up`，负值对应 `down`，与原采集约定一致。
+- 使用原采集就绪判断中的四元数/平移速度计算，并采用保守的基础阈值 **0.045 m/s** 和 **0.80 rad/s**，不引入应用模式或自适应窗口依赖。覆盖 RGB/深度时间区间的所有已观测运动段，以及至少最新一段，都必须满足限制。跟踪缺失、身份变化、超过 120 ms 的位姿间隔、历史不足，或未来深度缺少已观测位姿覆盖时，不接受帧；跨会话重置历史。适配器检查人脸/相机相对运动，不插值新位姿或变形 RGB，因此这是对时间误差的缓解，不代表传感器精确同步已验证。
 - 将已选深度、掩码、标定和刚体变换直接传入现有重建核心，使用默认重建配置；耗时重建在工作队列执行之前，相机已经停止。
 
 这是小型参考采集适配器，不是原应用完整的质量/接受系统。它不包含预览渲染、表情筛选、生产级采集引导、扫描数据库或评分。简单前景掩码可能裁掉人脸边缘，或因遮挡、明显运动、深度不佳而失败。必须在目标设备上验证真实采集质量及 RGB/深度配准；编译和人工测试不能证明真实扫描精度。
@@ -225,6 +226,7 @@ func projectionForDepth(
 
 - [`TrueDepthScanner.swift`](Sources/TrueDepthCapture/TrueDepthScanner.swift)：相机权限、TrueDepth 会话、本地帧/标定/Vision 处理、生命周期及重建衔接。
 - [`CaptureFrameSelection.swift`](Sources/TrueDepthCapture/CaptureFrameSelection.swift)：有界帧入口、时间检查、竖屏位姿和均衡视角选择。
+- [`CaptureMotionGate.swift`](Sources/TrueDepthCapture/CaptureMotionGate.swift)：覆盖 RGB/深度区间的本地运动证据及原基础速度阈值。
 - [`DepthForegroundMask.swift`](Sources/TrueDepthCapture/DepthForegroundMask.swift)：2D ROI 映射及实测深度连通前景。
 - [`DepthBufferReader.swift`](Sources/TrueDepthCapture/DepthBufferReader.swift)：按实际行跨度复制 Float32 深度并筛选距离。
 - [`相机示例`](Examples/TrueDepthCaptureDemo/CaptureDemoApp.swift)：新编写的最小 UI、本地 OBJ 输出和明确分享操作。
@@ -244,9 +246,9 @@ func projectionForDepth(
 
 测试覆盖人工球面提取、TSDF 配准与投票语义、掩码/深度断层/无实测支持的拒绝、修正后的实测边界、物理距离裁剪、公开接口的无效输入、镜头往返转换、GPU/CPU 逆投影一致性、已知刚体变换的 ICP 恢复，以及明确的 Metal 失败行为。解析椭球演示覆盖完整生产默认流程和 OBJ 导出。
 
-本仓库不包含真实人脸测试数据，也不提供真实设备的标定精度基准。核心与采集辅助逻辑在 Apple Silicon Mac 上通过 48 项 XCTest，解析重建演示也通过。新相机示例已通过通用 iOS 实机目标和 iOS Simulator 的 Release 构建。本次没有实体 iPhone 可用于真实相机扫描，因此真实采集、前景质量、时间同步和设备专属配准仍未验证。运动、表情、标定不准、前景掩码错误、视角覆盖不足仍可能导致失真或重建失败。圆柱参数化无法表示任意悬垂结构或完整头部；扩散和平滑也可能改变细节。
+本仓库不包含真实人脸测试数据，也不提供真实设备的标定精度基准。核心与采集辅助逻辑在 Apple Silicon Mac 上通过 57 项 XCTest，解析重建演示也通过。新相机示例已通过通用 iOS 实机目标和 iOS Simulator 的 Release 构建。本次没有实体 iPhone 可用于真实相机扫描，因此真实采集、前景质量、时间同步和设备专属配准仍未验证。运动、表情、标定不准、前景掩码错误、视角覆盖不足仍可能导致失真或重建失败。圆柱参数化无法表示任意悬垂结构或完整头部；扩散和平滑也可能改变细节。
 
-10 项采集辅助测试也在 iOS Simulator 上通过。示例的 UI 测试会验证：在 Simulator 开始扫描时报告硬件不支持、重新启用 Start，且不会生成人工 OBJ。这不代表实体相机已经验证。
+19 项采集辅助测试也在 iOS Simulator 上通过。示例的 UI 测试会验证：在 Simulator 开始扫描时报告硬件不支持、重新启用 Start，且不会生成人工 OBJ。这不代表实体相机已经验证。
 
 使用以下命令进行不签名的实体设备 SDK 构建，或运行示例的 Simulator UI 测试：
 

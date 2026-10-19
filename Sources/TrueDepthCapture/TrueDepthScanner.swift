@@ -132,7 +132,6 @@ public final class TrueDepthScanner: NSObject, ARSessionDelegate {
         configuration.isLightEstimationEnabled = false
         configuration.providesAudioData = false
         state = .capturing
-        ingress.setEpoch(token)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 45)
         timer.setEventHandler { [weak self] in
@@ -144,20 +143,24 @@ public final class TrueDepthScanner: NSObject, ARSessionDelegate {
         session.delegate = self
         session.delegateQueue = delegateQueue
         captureSession = session
+        ingress.setEpoch(token, sessionIdentifier: ObjectIdentifier(session))
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         emit(.started)
     }
 
     public func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        guard let token = ingress.acquire() else { return }
+        let face = frame.anchors.compactMap { $0 as? ARFaceAnchor }.first
+        let relative = face.flatMap { $0.isTracked ? simd_inverse(frame.camera.transform) * $0.transform : nil }
+        guard let work = ingress.acquire(sessionIdentifier: ObjectIdentifier(session), cameraFromFace: relative,
+            trackingID: face?.identifier, imageTime: frame.timestamp, depthTime: frame.capturedDepthDataTimestamp) else { return }
         queue.async { [self] in
             defer { ingress.release() }
-            guard generation == token, state == .capturing, captureSession === session else { return }
-            autoreleasepool { handleFrame(frame) }
+            guard generation == work.token, state == .capturing, captureSession === session else { return }
+            autoreleasepool { handleFrame(frame, motionAccepted: work.motionAccepted) }
         }
     }
 
-    private func handleFrame(_ frame: ARFrame) {
+    private func handleFrame(_ frame: ARFrame, motionAccepted: Bool) {
         guard let face = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first, face.isTracked else {
             notice("Keep one face visible.", time: frame.timestamp); return
         }
@@ -170,6 +173,9 @@ public final class TrueDepthScanner: NSObject, ARSessionDelegate {
                                          previousDepthTime: previousDepthTime,
                                          previousAcceptedTime: previousAcceptedTime),
               frame.timestamp - previousAttemptTime >= 0.25 else { return }
+        guard motionAccepted else {
+            notice("Move more slowly; waiting for stable synchronized tracking.", time: frame.timestamp); return
+        }
         previousDepthTime = depthTime; previousAttemptTime = frame.timestamp
         guard depth.depthDataAccuracy == .absolute else {
             notice("Waiting for metric depth.", time: frame.timestamp); return

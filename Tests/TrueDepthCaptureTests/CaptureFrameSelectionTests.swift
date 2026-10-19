@@ -82,4 +82,18 @@ final class CaptureFrameSelectionTests: XCTestCase {
             XCTAssertEqual(pose.pitchDegrees, 0, accuracy: 0.001)
         }
     }
+    func testPortraitPitchClassifiesLookingUpAndDownLikeOriginalCapture() {
+        let portrait = simd_float4x4(simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 0, 1)))
+        for angle: Float in [-15, 15] {
+            var transform = portrait * simd_float4x4(simd_quatf(angle: angle * .pi / 180, axis: SIMD3<Float>(1, 0, 0)))
+            transform[3] = SIMD4(0, 0, -0.3, 1)
+            let pose = CapturePose.portrait(transform)
+            XCTAssertEqual(pose.pitchDegrees, -Double(angle), accuracy: 0.001)
+            XCTAssertEqual(CaptureViewpoint.classify(pose), angle < 0 ? .up : .down)
+            var selection = CaptureFrameSelection()
+            selection.append(frame(1, yaw: pose.yawDegrees, pitch: pose.pitchDegrees))
+            XCTAssertEqual(selection.counts[angle < 0 ? .up : .down], 1)
+        }
+    }
+
 }

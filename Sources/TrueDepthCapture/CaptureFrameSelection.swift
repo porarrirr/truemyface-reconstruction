@@ -11,8 +11,8 @@ public enum CaptureViewpoint: String, CaseIterable {
         if abs(yaw) <= 7, abs(pitch) <= 7 { return .front }
         if abs(pitch) <= 12, yaw <= -8 { return .left }
         if abs(pitch) <= 12, yaw >= 8 { return .right }
-        if abs(yaw) <= 12, pitch <= -8 { return .up }
-        if abs(yaw) <= 12, pitch >= 8 { return .down }
+        if abs(yaw) <= 12, pitch <= -8 { return .down }
+        if abs(yaw) <= 12, pitch >= 8 { return .up }
         return nil
     }
 }
@@ -64,7 +64,23 @@ final class CaptureFrameIngress {
     private let lock = NSLock()
     private var epoch: UUID?
     private var busy = false
-    func setEpoch(_ epoch: UUID?) { lock.lock(); defer { lock.unlock() }; self.epoch = epoch }
+    private var sessionIdentifier: ObjectIdentifier?
+    private var motion = CaptureMotionGate()
+    func setEpoch(_ epoch: UUID?, sessionIdentifier: ObjectIdentifier? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        self.epoch = epoch; self.sessionIdentifier = sessionIdentifier; motion = CaptureMotionGate()
+    }
+    /// Observe every incoming pose, including frames dropped while image/depth work is busy.
+    func acquire(sessionIdentifier: ObjectIdentifier, cameraFromFace: simd_float4x4?,
+                 trackingID: UUID?, imageTime: TimeInterval, depthTime: TimeInterval)
+        -> (token: UUID, motionAccepted: Bool)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let epoch, self.sessionIdentifier == sessionIdentifier else { return nil }
+        motion.observe(cameraFromFace: cameraFromFace, timestamp: imageTime, trackingID: trackingID)
+        guard !busy else { return nil }
+        busy = true
+        return (epoch, motion.accepts(imageTime: imageTime, depthTime: depthTime))
+    }
     func acquire() -> UUID? {
         lock.lock(); defer { lock.unlock() }
         guard !busy, let epoch else { return nil }
