@@ -7,7 +7,15 @@ let width = 160, height = 192
 let focal: Float = 300
 let distance: Float = 0.35
 let a: Float = 0.075, b: Float = 0.100, c: Float = 0.070
-let intrinsics = CameraIntrinsics(fx: focal, fy: focal, cx: Float(width - 1) / 2, cy: Float(height - 1) / 2)
+let matrix = simd_float3x3(SIMD3(focal, 0, 0), SIMD3(0, focal, 0),
+                           SIMD3(Float(width - 1) / 2, Float(height - 1) / 2, 1))
+let zeroMagnification = [Float](repeating: 0, count: 16).withUnsafeBytes { Data($0) }
+let projection = try TrueDepthCalibration.makeProjectionModel(
+    intrinsicMatrix: matrix, referenceDimensions: SIMD2(Float(width), Float(height)),
+    lensDistortionCenter: SIMD2(matrix[2].x, matrix[2].y),
+    forwardLookupTable: nil, inverseLookupTable: zeroMagnification,
+    depthImageSize: SIMD2(Float(width), Float(height)))
+let intrinsics = projection.intrinsics
 var depth = [Float](repeating: .nan, count: width * height)
 var mask = [Bool](repeating: false, count: depth.count)
 for y in 0..<height {
@@ -28,7 +36,7 @@ var cameraFromFace = matrix_identity_float4x4
 cameraFromFace.columns.3.z = -distance
 let frames = (0..<3).map {
     FaceDepthKeyframe(timestamp: Double($0), depthValues: depth, width: width, height: height,
-                      intrinsics: intrinsics, cameraFromFace: cameraFromFace, faceMask: mask)
+                      intrinsics: intrinsics, lens: projection.lens, cameraFromFace: cameraFromFace, faceMask: mask)
 }
 guard let result = try Reconstruction.reconstruct(frames: frames) else {
     fatalError("Synthetic reconstruction produced no supported surface")

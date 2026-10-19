@@ -51,12 +51,7 @@ public enum Reconstruction {
                 throw ReconstructionInputError.invalidPose(frame: index)
             }
             if let lens = frame.lens {
-                let scalars = [lens.center.x, lens.center.y, lens.maxRadius,
-                               lens.targetToLookupScale.x, lens.targetToLookupScale.y]
-                guard scalars.allSatisfy(\.isFinite), lens.maxRadius > 0,
-                      lens.targetToLookupScale.x > 0, lens.targetToLookupScale.y > 0,
-                      (lens.forwardTable ?? []).allSatisfy({ $0.isFinite && $0 > -1 }),
-                      (lens.inverseTable ?? []).allSatisfy({ $0.isFinite && $0 > -1 }) else {
+                guard TrueDepthCalibrationValidator.validate(lens, intrinsics: k).isValid else {
                     throw ReconstructionInputError.invalidLens(frame: index)
                 }
             }

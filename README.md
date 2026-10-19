@@ -36,6 +36,10 @@ Metal kernels implement mask erosion, iterative depth preprocessing, calibrated 
 
 Depth intrinsics must be scaled to the actual depth-buffer resolution. Optional radial lens lookup tables support observed/rectified pixel conversion, numerical inversion, and nonuniform reference-image scaling. Projection and deprojection use matching conventions.
 
+The package also includes **local calibration assembly and detailed validation**. `TrueDepthCalibration` scales the SDK intrinsics and lens center, preserves the lookup-table reference radius, and decodes the two Float32 tables. `TrueDepthCalibrationValidator` checks nonfinite values, positive focal lengths, lookup coordinate metadata, table byte lengths, and the derivative of the interpolated radial mapping (including foldovers between knots). When both tables exist, sampled round trips report p95/max errors in both directions. Structural errors reject calibration; disagreement between otherwise valid direct tables remains an observable warning, matching the original algorithm.
+
+The AVFoundation adapter only reads the calibration object already provided by the caller. Calibration construction and validation run entirely in memory. No telemetry, upload/export record, network request, remote configuration, device identifier collection, or server dependency is included. The calibration fingerprint is a local deterministic change marker, not a cryptographic identity or authentication mechanism.
+
 No ARKit face vertices, canonical mesh, blend-shape geometry, or face-shape prior is supplied to this core. A caller may obtain rigid registration from a tracker, but it must provide the measured depth and foreground mask independently.
 
 ## Pipeline
@@ -104,6 +108,30 @@ For multiview reconstruction, pass several accepted, mutually overlapping frames
 
 `ReconstructionResult` provides the mesh, frame count, input point count, median translation correction, and actual TSDF voxel size. `nil` means insufficient supported geometry; malformed input and Metal failures throw. The package does not perform capture guidance, synchronization, expression screening, or automatic foreground segmentation.
 
+### Build calibration from the local SDK object
+
+```swift
+import AVFoundation
+import simd
+import TrueDepthReconstruction
+
+func projectionForDepth(
+    _ calibration: AVCameraCalibrationData,
+    depthWidth: Int, depthHeight: Int
+) throws -> TrueDepthProjectionModel {
+    try TrueDepthCalibration.makeProjectionModel(
+        calibration: calibration,
+        depthImageSize: SIMD2(Float(depthWidth), Float(depthHeight))
+    )
+}
+```
+
+Use the calibration attached to the corresponding depth image; pass the returned `intrinsics` **and** `lens` into each `FaceDepthKeyframe`. Inspect `validation.warnings` when present. The same factory has a raw-value overload accepting the intrinsic matrix, reference dimensions, lens center, and lookup-table bytes, so its complete math can be tested without a camera.
+
+The factory requires valid lens calibration and throws for missing tables; it never silently replaces raw-depth calibration with a pinhole model. For genuinely rectified/pinhole input, construct frames with the appropriate intrinsics and `lens: nil`. Do not rectify the same input twice. `Reconstruction.reconstruct` also applies detailed structural lens validation before starting GPU work.
+
+The only AVFoundation import is isolated in the small SDK adapter. The math and validator use Foundation/simd. Capturing frames, image-to-depth alignment checks, segmentation, and capture-session policy remain the caller's responsibility. No recorded device calibration tables are bundled; tests and the demo use artificial tables.
+
 ### Input and coordinate contract
 
 | Input | Contract |
@@ -142,6 +170,9 @@ Voxel size can increase to respect the maximum grid dimension. Voxel/bin resolut
 - [`MeasuredTSDFSurfaceReconstructor.swift`](Sources/TrueDepthReconstruction/MeasuredTSDFSurfaceReconstructor.swift): projective fusion, measured grid extent, physical front crop.
 - [`MarchingCubes.swift`](Sources/TrueDepthReconstruction/MarchingCubes.swift): observed-cell surface extraction and shared-edge vertices.
 - [`MeasuredDepthPreprocessor.metal`](Sources/TrueDepthReconstruction/MeasuredDepthPreprocessor.metal): GPU kernels, with Swift dispatch wrappers alongside it.
+- [`TrueDepthCalibration.swift`](Sources/TrueDepthReconstruction/TrueDepthCalibration.swift): local calibration assembly and safe Float32 table decoding.
+- [`TrueDepthCalibration+AVFoundation.swift`](Sources/TrueDepthReconstruction/TrueDepthCalibration+AVFoundation.swift): read-only SDK calibration adapter.
+- [`TrueDepthCalibrationValidator.swift`](Sources/TrueDepthReconstruction/TrueDepthCalibrationValidator.swift): monotonicity, coordinate metadata, composition errors, and local fingerprint.
 - [`CameraCalibration.swift`](Sources/TrueDepthReconstruction/CameraCalibration.swift): intrinsics scaling, lens LUT math, matching projection/deprojection.
 - [`SyntheticDemo`](Sources/SyntheticDemo/main.swift): executable end-to-end example with artificial data only.
 
@@ -149,7 +180,7 @@ Voxel size can increase to respect the maximum grid dimension. Voxel/bin resolut
 
 Tests cover synthetic sphere extraction, TSDF registration and vote semantics, masked/discontinuous/unsupported depth rejection, corrected measured bounds, physical cropping, invalid public inputs, lens round trips, GPU/CPU deprojection agreement, known-transform ICP recovery, and explicit Metal failure behavior. The analytic ellipsoid demo exercises the complete production-default path and OBJ export.
 
-There are no public real-face fixtures or calibrated real-device accuracy benchmarks. This extraction passed 21 XCTest cases and the full analytic demo on an Apple Silicon Mac. The library also built for iOS Simulator (arm64 and x86_64). Physical iPhone capture and application integration are outside this repository's validation. Motion, expressions, poor calibration, foreground-mask errors, and insufficient viewpoint overlap can still distort or prevent reconstruction. Cylindrical parameterization cannot represent arbitrary overhangs or a complete head. Diffusion and smoothing may alter fine detail.
+There are no public real-face fixtures or calibrated real-device accuracy benchmarks. This extraction passed 38 XCTest cases and the full analytic demo on an Apple Silicon Mac. The library also built for iOS Simulator (arm64 and x86_64). Physical iPhone capture and application integration are outside this repository's validation. Motion, expressions, poor calibration, foreground-mask errors, and insufficient viewpoint overlap can still distort or prevent reconstruction. Cylindrical parameterization cannot represent arbitrary overhangs or a complete head. Diffusion and smoothing may alter fine detail.
 
 To reproduce the iOS Simulator compile check:
 

@@ -36,6 +36,10 @@ Metal 内核负责掩码腐蚀、迭代深度预处理、标定逆投影、网�
 
 深度相机内参必须缩放到实际深度缓冲区分辨率。可选的径向畸变查找表支持观测像素/校正像素转换、数值反演和参考图像的非等比例缩放，投影与逆投影采用一致约定。
 
+本包还包含**完全本地的标定模型组装与详细验证**。`TrueDepthCalibration` 缩放 SDK 内参和畸变中心，保留查找表参考坐标中的最大半径，并解码两种 Float32 查找表。`TrueDepthCalibrationValidator` 检查非有限值、正焦距、查找表坐标元数据、原始字节长度和插值后径向映射的导数（包括节点之间的折返）。同时存在两张表时，通过采样往返转换报告双向 p95/最大误差。结构性错误会拒绝标定；结构有效但双表不一致时保留可查询警告，与原算法一致。
+
+AVFoundation 适配器仅读取调用方已提供的标定对象。模型组装和验证均在内存中完成，不包含遥测、上传/导出记录、网络请求、远程配置、设备标识符采集或服务端依赖。标定指纹仅用于本地确定性变更检测，不是加密身份或认证机制。
+
 本核心不接收 ARKit 人脸顶点、标准人脸网格、表情混合形状或人脸形状先验。调用方可以使用跟踪器提供刚体配准，但必须独立提供实测深度和前景掩码。
 
 ## 处理流程
@@ -104,6 +108,30 @@ func reconstructSurface(
 
 `ReconstructionResult` 包含网格、帧数、输入点数、位姿平移修正中位数和实际 TSDF 体素大小。返回 `nil` 表示支持的几何不足；格式错误和 Metal 故障会抛出错误。本包不执行采集引导、采集同步、表情筛选或自动前景分割。
 
+### 从本地 SDK 对象组装标定模型
+
+```swift
+import AVFoundation
+import simd
+import TrueDepthReconstruction
+
+func projectionForDepth(
+    _ calibration: AVCameraCalibrationData,
+    depthWidth: Int, depthHeight: Int
+) throws -> TrueDepthProjectionModel {
+    try TrueDepthCalibration.makeProjectionModel(
+        calibration: calibration,
+        depthImageSize: SIMD2(Float(depthWidth), Float(depthHeight))
+    )
+}
+```
+
+使用对应深度图所附带的标定对象，将返回的 `intrinsics` **和** `lens` 一起传入每个 `FaceDepthKeyframe`，并检查可能存在的 `validation.warnings`。该工厂也提供原始数值重载，接受内参矩阵、参考尺寸、畸变中心和查找表字节，因此无需相机即可测试完整计算过程。
+
+工厂要求有效的镜头标定，缺少查找表会抛出错误，不会把原始深度的标定悄悄替换为针孔模型。对于确实已经校正/符合针孔模型的输入，可直接以正确内参和 `lens: nil` 构造帧；不要重复校正同一输入。`Reconstruction.reconstruct` 也会在 GPU 工作开始前进行详细的镜头结构验证。
+
+唯一的 AVFoundation 导入隔离在小型 SDK 适配器中，数学计算和验证器只使用 Foundation/simd。帧采集、图像与深度对齐检查、前景分割和采集会话策略仍由调用方负责。本仓库不附带真实设备标定表；测试和演示使用人工表。
+
 ### 输入与坐标约定
 
 | 输入 | 约定 |
@@ -142,6 +170,9 @@ func reconstructSurface(
 - [`MeasuredTSDFSurfaceReconstructor.swift`](Sources/TrueDepthReconstruction/MeasuredTSDFSurfaceReconstructor.swift)：投影式融合、实测范围和物理距离裁剪。
 - [`MarchingCubes.swift`](Sources/TrueDepthReconstruction/MarchingCubes.swift)：仅对已观测单元提取表面，并共享边顶点。
 - [`MeasuredDepthPreprocessor.metal`](Sources/TrueDepthReconstruction/MeasuredDepthPreprocessor.metal)：GPU 内核；同目录的 Swift 文件负责调度。
+- [`TrueDepthCalibration.swift`](Sources/TrueDepthReconstruction/TrueDepthCalibration.swift)：本地标定组装及安全的 Float32 表解码。
+- [`TrueDepthCalibration+AVFoundation.swift`](Sources/TrueDepthReconstruction/TrueDepthCalibration+AVFoundation.swift)：只读 SDK 标定适配器。
+- [`TrueDepthCalibrationValidator.swift`](Sources/TrueDepthReconstruction/TrueDepthCalibrationValidator.swift)：单调性、坐标元数据、往返误差和本地指纹。
 - [`CameraCalibration.swift`](Sources/TrueDepthReconstruction/CameraCalibration.swift)：内参缩放、镜头查找表、对应的投影与逆投影。
 - [`SyntheticDemo`](Sources/SyntheticDemo/main.swift)：仅使用人工数据的完整可执行示例。
 
@@ -149,7 +180,7 @@ func reconstructSurface(
 
 测试覆盖人工球面提取、TSDF 配准与投票语义、掩码/深度断层/无实测支持的拒绝、修正后的实测边界、物理距离裁剪、公开接口的无效输入、镜头往返转换、GPU/CPU 逆投影一致性、已知刚体变换的 ICP 恢复，以及明确的 Metal 失败行为。解析椭球演示覆盖完整生产默认流程和 OBJ 导出。
 
-本仓库不包含真实人脸测试数据，也不提供真实设备的标定精度基准。本次独立提取在 Apple Silicon Mac 上通过 21 项 XCTest 和完整解析演示，并通过 iOS Simulator（arm64 和 x86_64）库构建。实体 iPhone 采集和应用集成不在本仓库的验证范围内。运动、表情、标定不准、前景掩码错误、视角覆盖不足仍可能导致失真或重建失败。圆柱参数化无法表示任意悬垂结构或完整头部；扩散和平滑也可能改变细节。
+本仓库不包含真实人脸测试数据，也不提供真实设备的标定精度基准。本次独立提取在 Apple Silicon Mac 上通过 38 项 XCTest 和完整解析演示，并通过 iOS Simulator（arm64 和 x86_64）库构建。实体 iPhone 采集和应用集成不在本仓库的验证范围内。运动、表情、标定不准、前景掩码错误、视角覆盖不足仍可能导致失真或重建失败。圆柱参数化无法表示任意悬垂结构或完整头部；扩散和平滑也可能改变细节。
 
 可使用以下命令复现 iOS Simulator 编译检查：
 

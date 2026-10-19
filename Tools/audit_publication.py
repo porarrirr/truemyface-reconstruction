@@ -11,6 +11,11 @@ ALLOWED = {
     'Tools/audit_publication.py',
     'Sources/SyntheticDemo/main.swift',
     'Sources/TrueDepthReconstruction/CameraCalibration.swift',
+    'Sources/TrueDepthReconstruction/TrueDepthCalibration.swift',
+    'Sources/TrueDepthReconstruction/TrueDepthCalibration+AVFoundation.swift',
+    'Sources/TrueDepthReconstruction/TrueDepthCalibrationValidator.swift',
+    'Tests/TrueDepthReconstructionTests/TrueDepthCalibrationTests.swift',
+    'Tests/TrueDepthReconstructionTests/TrueDepthCalibrationValidatorTests.swift',
     'Sources/TrueDepthReconstruction/CompactUniformGrid.swift',
     'Sources/TrueDepthReconstruction/CylindricalFaceFrame.swift',
     'Sources/TrueDepthReconstruction/FaceDepthKeyframe.swift',
@@ -55,13 +60,15 @@ for name in sorted(paths & ALLOWED):
     if p.suffix not in {'.swift', '.metal'}:
         continue
     for module in re.findall(r'^\s*(?:@testable\s+)?import\s+(\w+)', source, re.M):
-        if module not in ALLOWED_IMPORTS:
+        if module not in ALLOWED_IMPORTS and not (
+            module == 'AVFoundation' and name == 'Sources/TrueDepthReconstruction/TrueDepthCalibration+AVFoundation.swift'
+        ):
             errors.append(f'Forbidden import {module}: {name}')
     checks = {
         'network endpoint': r'https?://',
         'personal filesystem path': r'/(?:Users|home)/',
-        'network client': r'\b(?:URLSession|URLRequest|NWConnection|CFHTTPMessage)\b',
-        'app or capture dependency': r'\b(?:ARFaceGeometry|ARFaceProvider|SwiftUI|UIKit|SceneKit|SwiftData|AVCaptureSession|WorkSession|AppAttest)\b',
+        'network client': r'\b(?:URLSession|NSURLSession|URLRequest|NWConnection|CFHTTPMessage|WebSocket|WKWebView)\b',
+        'app or capture dependency': r'\b(?:ARFaceGeometry|ARFaceProvider|SwiftUI|UIKit|SceneKit|SwiftData|AVCaptureSession|WorkSession|AppAttest|TelemetryClient|TelemetryServer|ScanTelemetry)\b',
         'credential': r'(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)',
         'real fixture reference': r'(?:RealCaptureFixture|Fixtures/RealCapture|truemyface-debug-\d)',
     }
