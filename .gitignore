@@ -3,3 +3,4 @@
 .DS_Store
 *.obj
 *.metallib
+Examples/TrueDepthCaptureDemo/TrueDepthCaptureDemo.xcodeproj/

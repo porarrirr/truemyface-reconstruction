@@ -1,0 +1,50 @@
+name: TrueDepthCaptureDemo
+options:
+  bundleIdPrefix: org.example
+  deploymentTarget:
+    iOS: '18.0'
+packages:
+  TrueDepthReconstruction:
+    path: ../..
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    CODE_SIGN_STYLE: Automatic
+targets:
+  TrueDepthCaptureDemo:
+    type: application
+    platform: iOS
+    sources:
+      - CaptureDemoApp.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.example.TrueDepthCaptureDemo
+        INFOPLIST_FILE: Info.plist
+        TARGETED_DEVICE_FAMILY: '1'
+    dependencies:
+      - package: TrueDepthReconstruction
+        product: TrueDepthReconstruction
+      - package: TrueDepthReconstruction
+        product: TrueDepthCapture
+  TrueDepthCaptureDemoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - CaptureDemoUITests.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.example.TrueDepthCaptureDemoUITests
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: TrueDepthCaptureDemo
+schemes:
+  TrueDepthCaptureDemo:
+    build:
+      targets:
+        TrueDepthCaptureDemo: all
+    run:
+      config: Release
+    test:
+      config: Release
+      targets:
+        - TrueDepthCaptureDemoUITests

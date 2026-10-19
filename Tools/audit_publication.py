@@ -10,6 +10,16 @@ ALLOWED = {
     '.gitignore', 'LICENSE', 'Package.swift', 'README.md', 'README.zh-CN.md',
     'Tools/audit_publication.py',
     'Sources/SyntheticDemo/main.swift',
+    'Sources/TrueDepthCapture/CaptureFrameSelection.swift',
+    'Sources/TrueDepthCapture/DepthBufferReader.swift',
+    'Sources/TrueDepthCapture/DepthForegroundMask.swift',
+    'Sources/TrueDepthCapture/TrueDepthScanner.swift',
+    'Tests/TrueDepthCaptureTests/CaptureFrameSelectionTests.swift',
+    'Tests/TrueDepthCaptureTests/DepthCaptureInputTests.swift',
+    'Examples/TrueDepthCaptureDemo/CaptureDemoApp.swift',
+    'Examples/TrueDepthCaptureDemo/CaptureDemoUITests.swift',
+    'Examples/TrueDepthCaptureDemo/project.yml',
+    'Examples/TrueDepthCaptureDemo/Info.plist',
     'Sources/TrueDepthReconstruction/CameraCalibration.swift',
     'Sources/TrueDepthReconstruction/TrueDepthCalibration.swift',
     'Sources/TrueDepthReconstruction/TrueDepthCalibration+AVFoundation.swift',
@@ -35,8 +45,16 @@ ALLOWED = {
     'Tests/TrueDepthReconstructionTests/MeasuredTSDFSurfaceReconstructorTests.swift',
     'Tests/TrueDepthReconstructionTests/ReconstructionTests.swift',
 }
-# Deliberately no network, app, capture, rendering or persistence frameworks.
+# Framework imports for local capture and the new demo are allowed only at exact reviewed paths.
 ALLOWED_IMPORTS = {'Foundation', 'simd', 'Metal', 'XCTest', 'PackageDescription', 'TrueDepthReconstruction'}
+EXTRA_IMPORTS = {
+    'Sources/TrueDepthReconstruction/TrueDepthCalibration+AVFoundation.swift': {'AVFoundation'},
+    'Sources/TrueDepthCapture/DepthBufferReader.swift': {'CoreVideo'},
+    'Sources/TrueDepthCapture/TrueDepthScanner.swift': {'ARKit', 'AVFoundation', 'ImageIO', 'Vision'},
+    'Tests/TrueDepthCaptureTests/CaptureFrameSelectionTests.swift': {'TrueDepthCapture'},
+    'Tests/TrueDepthCaptureTests/DepthCaptureInputTests.swift': {'CoreVideo', 'TrueDepthCapture'},
+    'Examples/TrueDepthCaptureDemo/CaptureDemoApp.swift': {'SwiftUI', 'TrueDepthCapture'},
+}
 errors = []
 if (ROOT / '.git').exists():
     raw = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], cwd=ROOT)
@@ -60,22 +78,24 @@ for name in sorted(paths & ALLOWED):
     if p.suffix not in {'.swift', '.metal'}:
         continue
     for module in re.findall(r'^\s*(?:@testable\s+)?import\s+(\w+)', source, re.M):
-        if module not in ALLOWED_IMPORTS and not (
-            module == 'AVFoundation' and name == 'Sources/TrueDepthReconstruction/TrueDepthCalibration+AVFoundation.swift'
-        ):
+        if module not in ALLOWED_IMPORTS | EXTRA_IMPORTS.get(name, set()):
             errors.append(f'Forbidden import {module}: {name}')
     checks = {
         'network endpoint': r'https?://',
         'personal filesystem path': r'/(?:Users|home)/',
         'network client': r'\b(?:URLSession|NSURLSession|URLRequest|NWConnection|CFHTTPMessage|WebSocket|WKWebView)\b',
-        'app or capture dependency': r'\b(?:ARFaceGeometry|ARFaceProvider|SwiftUI|UIKit|SceneKit|SwiftData|AVCaptureSession|WorkSession|AppAttest|TelemetryClient|TelemetryServer|ScanTelemetry)\b',
+        'app or capture dependency': r'\b(?:ARFaceGeometry|ARFaceProvider|UIKit|SceneKit|SwiftData|AVCaptureSession|WorkSession|AppAttest|TelemetryClient|TelemetryServer|ScanTelemetry)\b',
         'credential': r'(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)',
         'real fixture reference': r'(?:RealCaptureFixture|Fixtures/RealCapture|truemyface-debug-\d)',
     }
+    if name != 'Examples/TrueDepthCaptureDemo/CaptureDemoApp.swift':
+        checks['original UI dependency'] = r'\bSwiftUI\b'
+    if name == 'Sources/TrueDepthCapture/TrueDepthScanner.swift':
+        checks['tracking facial shape access'] = r'\.\s*(?:geometry|blendShapes|leftEyeTransform|rightEyeTransform)\b'
     for label, pattern in checks.items():
         if re.search(pattern, source):
             errors.append(f'{label}: {name}')
 if errors:
     print('\n'.join(errors), file=sys.stderr)
     sys.exit(1)
-print(f'Publication audit passed: {len(paths)} allowlisted text files; algorithm-only sources and synthetic tests/demo.')
+print(f'Publication audit passed: {len(paths)} allowlisted text files; reviewed reconstruction/capture sources, new minimal demo, and synthetic tests.')

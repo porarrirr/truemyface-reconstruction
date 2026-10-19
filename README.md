@@ -1,12 +1,12 @@
 # TrueDepth Reconstruction
 
-**Measured depth → robust registration → a dense 3D facial surface.**
+**TrueDepth camera → local calibration → robust registration → a dense 3D facial surface.**
 
 English · [简体中文](README.zh-CN.md)
 
 A focused Swift + Metal extraction of the measured-depth reconstruction algorithm developed for **TrueMyFace**. The interesting part is how noisy, imperfectly registered depth frames become one coherent surface: robust point-to-plane alignment, projective TSDF fusion, and cylindrical remeshing work together instead of directly triangulating a stack of noisy point clouds.
 
-This repository contains the reconstruction core, minimal mathematical input/output types, synthetic tests, and an analytic demo. It contains no application UI, capture-session implementation, scoring, persistence, server code, network client, credentials, or recorded face data. It has its own history, independent of the application repository.
+This repository contains the reconstruction core, an isolated iOS TrueDepth capture adapter, a newly written minimal iPhone sample, synthetic tests, and an analytic demo. It contains no TrueMyFace application UI or app infrastructure, scoring, database persistence, server code, network client, credentials, or recorded face data. It has its own history, independent of the application repository.
 
 ## What makes the pipeline interesting
 
@@ -46,7 +46,8 @@ No ARKit face vertices, canonical mesh, blend-shape geometry, or face-shape prio
 
 ```mermaid
 flowchart TD
-    A[Measured depth + foreground masks + intrinsics + rigid poses] --> B[Metal mask erosion and depth preprocessing]
+    S[iOS front TrueDepth capture + image-derived ROI + rigid pose] --> A[Measured depth + foreground masks + intrinsics + rigid poses]
+    A --> B[Metal mask erosion and depth preprocessing]
     B --> C[Calibrated depth deprojection]
     C --> D[Robust multiscale point-to-plane ICP]
     D --> E[Projective TSDF with measured support]
@@ -60,7 +61,7 @@ flowchart TD
 ## Requirements
 
 - macOS 14+ with a Metal-capable GPU for the command-line demo and tests.
-- iOS 18+ for library integration; physical TrueDepth capture must be supplied by the integrating project.
+- iOS 18+ and a supported physical front TrueDepth iPhone for `TrueDepthCapture` and the camera sample. The sample is portrait-only. Simulator can build and test helper logic but cannot supply camera depth.
 - Swift tools 5.9+ and an Xcode toolchain/SDK supporting the chosen target. Swift 5 language mode is used.
 - No third-party package dependencies or model downloads.
 
@@ -78,6 +79,64 @@ swift run -c release reconstruct-synthetic /tmp/synthetic-ellipsoid.obj
 The demo analytically intersects camera rays with an ellipsoid, creates three synthetic depth frames in memory, and runs the full pipeline with the default reconstruction settings. It writes an OBJ only when an output path is provided. No camera access or downloaded data is involved.
 
 Release optimization is recommended for reconstruction. A reference local run produced **43,470 vertices / 86,119 triangles**, using a **1.5 mm TSDF voxel**. These are synthetic-demo results, not an accuracy or speed benchmark; counts may vary with floating-point/toolchain differences.
+
+## Run the camera-to-mesh sample on iPhone
+
+The sample in [`Examples/TrueDepthCaptureDemo`](Examples/TrueDepthCaptureDemo) is a **new minimal harness**, not a copy of the TrueMyFace UI. It starts the camera, reports five-direction coverage, reconstructs a mesh, and lets you share an OBJ. No account, backend, or network setup is required.
+
+With XcodeGen installed, generate its project from the checked-in `project.yml`:
+
+```sh
+cd Examples/TrueDepthCaptureDemo
+xcodegen generate
+open TrueDepthCaptureDemo.xcodeproj
+```
+
+1. In Xcode, choose your signing team and a unique bundle identifier, then select a supported physical iPhone. The scheme runs **Release** for practical reconstruction performance.
+2. Hold the device in **portrait** orientation. Tap **Start camera scan** and grant camera permission. Keep one neutral face about 20–50 cm from the front camera.
+3. Begin facing forward, then slowly look left, right, up, and down. Keep the phone steady. The sample shows two accepted frames per direction; full coverage (10 frames) automatically stops capture and reconstructs.
+4. Alternatively, tap **Stop and reconstruct** after at least five accepted frames across at least three directions, including the front. Insufficient coverage fails explicitly. Capture times out after 45 seconds.
+5. After reconstruction, the sample reports mesh counts and offers **Share generated OBJ**. Vertices use meters. No raw scan fixture is included in the repository.
+
+**Cancel capture**, backgrounding the sample, session interruption, or a tracked-face identity change discards the current capture. In-progress reconstruction runs to completion; it cannot be interrupted by `cancel()`. The camera is paused before reconstruction. Simulator start attempts report unsupported hardware rather than substituting a synthetic scan.
+
+The adapter retains selected depth frames in memory. Camera images are used transiently for local Vision detection and are not saved. The sample writes the generated OBJ to the app's temporary directory after completion and removes the previous sample OBJ when another scan starts. Sharing is an explicit user action. Neither the adapter nor the sample includes uploads, telemetry, server endpoints, authentication, remote configuration, or network clients.
+
+### Capture product integration
+
+Add the `TrueDepthCapture` and `TrueDepthReconstruction` products to your own iOS app. Supply `NSCameraUsageDescription` in its Info.plist and keep the capture interface in portrait. Retain the scanner for the scan's lifetime:
+
+```swift
+import TrueDepthCapture
+
+final class CaptureOwner {
+    private let scanner = TrueDepthScanner { event in
+        // Called on the main queue. Forward progress/errors to your own interface.
+        switch event {
+        case .completed(let result): print("Generated vertices:", result.mesh.vertexCount)
+        case .failed(let error): print(error.localizedDescription)
+        default: break
+        }
+    }
+
+    func start() { scanner.start() }
+    func stopAndReconstruct() { scanner.finish() }
+    func cancelCapture() { scanner.cancel() }
+}
+```
+
+`TrueDepthScanner` is available on iOS only; the pure capture helpers can be tested on macOS. The reconstruction-only product does not import ARKit, Vision, or SwiftUI. The capture product contains no UI. Its small sample is the only file importing SwiftUI.
+
+### Capture data path and scope
+
+- The adapter explicitly selects a front `.builtInTrueDepthCamera` AR face-tracking video format. Face tracking alone is insufficient: [Apple documents that captured depth requires a TrueDepth face-tracking format](https://developer.apple.com/documentation/arkit/arconfiguration/videoformat-swift.class/capturedevicetype).
+- Only tracked-face **rigid transforms and identity** are read. No tracking facial vertices, topology, blend-shape geometry, or shape prior is read or used.
+- `capturedDepthData` is converted to Float32 meters; padded rows are copied correctly. Absolute metric depth and its own calibration are required. Missing, duplicate, out-of-order, or more than 120 ms misaligned depth timestamps are rejected. Depth and RGB timestamps are not assumed equal; [Apple describes their differing cadence](https://developer.apple.com/documentation/arkit/arframe/captureddepthdatatimestamp).
+- Vision supplies a 2D face rectangle from the corresponding RGB frame in portrait orientation. A conservatively inset 2D ellipse and a depth-connected foreground component create the mask. This clips the ROI; it supplies no 3D facial shape. Depth gating uses 0.15–0.65 m, an 85 mm band around the center median, and 12 mm adjacent-pixel continuity.
+- At most one retained camera frame is processed at a time; excess incoming frames are dropped. Accepted samples are at least 250 ms apart. Selection is bounded to two frames per direction, with angular/time diversity for the second frame.
+- Selected depth, masks, calibration, and rigid transforms go directly to the existing reconstruction core with its default settings. Capture stops before the expensive reconstruction work runs on its worker queue.
+
+This is a small reference capture adapter, not the full application's quality/acceptance system. It has no preview renderer, expression screening, production capture guidance, saved scan database, or scoring. Its simple foreground mask can crop facial edges or fail on occlusions, strong motion, and poor depth. Physical-device quality and RGB/depth registration must be validated on the target device; compilation and synthetic tests do not establish real-scan accuracy.
 
 ## Swift integration
 
@@ -106,7 +165,7 @@ func reconstructSurface(
 
 For multiview reconstruction, pass several accepted, mutually overlapping frames in the same face-local coordinate system. The public entry point uses the core's production defaults. Run this synchronous, computationally expensive operation away from the main thread; callers should serialize reconstruction jobs to control peak memory.
 
-`ReconstructionResult` provides the mesh, frame count, input point count, median translation correction, and actual TSDF voxel size. `nil` means insufficient supported geometry; malformed input and Metal failures throw. The package does not perform capture guidance, synchronization, expression screening, or automatic foreground segmentation.
+`ReconstructionResult` provides the mesh, frame count, input point count, median translation correction, and actual TSDF voxel size. `nil` means insufficient supported geometry; malformed input and Metal failures throw. This reconstruction entry point accepts already prepared frames. For the reference camera acquisition, timing checks, and foreground masking, use the separate `TrueDepthCapture` product; it does not include expression screening or the original application's guidance system.
 
 ### Build calibration from the local SDK object
 
@@ -130,7 +189,7 @@ Use the calibration attached to the corresponding depth image; pass the returned
 
 The factory requires valid lens calibration and throws for missing tables; it never silently replaces raw-depth calibration with a pinhole model. For genuinely rectified/pinhole input, construct frames with the appropriate intrinsics and `lens: nil`. Do not rectify the same input twice. `Reconstruction.reconstruct` also applies detailed structural lens validation before starting GPU work.
 
-The only AVFoundation import is isolated in the small SDK adapter. The math and validator use Foundation/simd. Capturing frames, image-to-depth alignment checks, segmentation, and capture-session policy remain the caller's responsibility. No recorded device calibration tables are bundled; tests and the demo use artificial tables.
+Within the reconstruction product, the only AVFoundation import is isolated in the small calibration adapter; its math and validator use Foundation/simd. The separate `TrueDepthCapture` product supplies the reference acquisition/masking/session path above. Detailed image-to-depth alignment verification and application-specific acceptance policies remain the integrating project's responsibility. No recorded device calibration tables are bundled; tests and the demo use artificial tables.
 
 ### Input and coordinate contract
 
@@ -164,6 +223,11 @@ Voxel size can increase to respect the maximum grid dimension. Voxel/bin resolut
 
 ## Source map
 
+- [`TrueDepthScanner.swift`](Sources/TrueDepthCapture/TrueDepthScanner.swift): camera permission, TrueDepth session, local frame/calibration/Vision processing, lifecycle, and reconstruction handoff.
+- [`CaptureFrameSelection.swift`](Sources/TrueDepthCapture/CaptureFrameSelection.swift): bounded frame ingress, timing, portrait pose, and balanced viewpoint selection.
+- [`DepthForegroundMask.swift`](Sources/TrueDepthCapture/DepthForegroundMask.swift): 2D ROI mapping and measured-depth connected foreground.
+- [`DepthBufferReader.swift`](Sources/TrueDepthCapture/DepthBufferReader.swift): stride-aware Float32 depth copying and distance gating.
+- [`Camera sample`](Examples/TrueDepthCaptureDemo/CaptureDemoApp.swift): new minimal UI, local OBJ output, and explicit sharing.
 - [`Reconstruction.swift`](Sources/TrueDepthReconstruction/Reconstruction.swift): minimal public entry point and input validation.
 - [`MeasuredFaceReconstructor.swift`](Sources/TrueDepthReconstruction/MeasuredFaceReconstructor.swift): pipeline, robust ICP, local normals, incremental oriented model, cylindrical triangulation.
 - [`CompactUniformGrid.swift`](Sources/TrueDepthReconstruction/CompactUniformGrid.swift): contiguous spatial indexing and borrowed query views.
@@ -180,7 +244,25 @@ Voxel size can increase to respect the maximum grid dimension. Voxel/bin resolut
 
 Tests cover synthetic sphere extraction, TSDF registration and vote semantics, masked/discontinuous/unsupported depth rejection, corrected measured bounds, physical cropping, invalid public inputs, lens round trips, GPU/CPU deprojection agreement, known-transform ICP recovery, and explicit Metal failure behavior. The analytic ellipsoid demo exercises the complete production-default path and OBJ export.
 
-There are no public real-face fixtures or calibrated real-device accuracy benchmarks. This extraction passed 38 XCTest cases and the full analytic demo on an Apple Silicon Mac. The library also built for iOS Simulator (arm64 and x86_64). Physical iPhone capture and application integration are outside this repository's validation. Motion, expressions, poor calibration, foreground-mask errors, and insufficient viewpoint overlap can still distort or prevent reconstruction. Cylindrical parameterization cannot represent arbitrary overhangs or a complete head. Diffusion and smoothing may alter fine detail.
+There are no public real-face fixtures or calibrated real-device accuracy benchmarks. The core and capture helpers passed 48 XCTest cases on an Apple Silicon Mac, and the analytic reconstruction demo passed. The new camera sample built in Release for generic iOS devices and iOS Simulator. A physical iPhone was not available for an actual camera scan, so real capture, foreground quality, timing, and device-specific registration remain unverified. Motion, expressions, poor calibration, foreground-mask errors, and insufficient viewpoint overlap can still distort or prevent reconstruction. Cylindrical parameterization cannot represent arbitrary overhangs or a complete head. Diffusion and smoothing may alter fine detail.
+
+The 10 capture-helper tests also passed on iOS Simulator. The sample has a UI test that verifies a Simulator scan reports unsupported hardware, re-enables Start, and produces no synthetic OBJ. This does not test a physical camera.
+
+To build the sample for a physical-device SDK without signing, or run its Simulator UI test:
+
+```sh
+xcodegen generate --spec Examples/TrueDepthCaptureDemo/project.yml
+xcodebuild -project Examples/TrueDepthCaptureDemo/TrueDepthCaptureDemo.xcodeproj \
+  -scheme TrueDepthCaptureDemo -configuration Release \
+  -destination 'generic/platform=iOS' \
+  -derivedDataPath /tmp/truedepth-camera-device-build CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project Examples/TrueDepthCaptureDemo/TrueDepthCaptureDemo.xcodeproj \
+  -scheme TrueDepthCaptureDemo \
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
+  -derivedDataPath /tmp/truedepth-camera-ui-tests CODE_SIGNING_ALLOWED=NO test
+```
+
+Replace the Simulator name with one installed in your Xcode if needed.
 
 To reproduce the iOS Simulator compile check:
 
