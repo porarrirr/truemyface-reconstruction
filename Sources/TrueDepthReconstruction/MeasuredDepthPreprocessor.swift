@@ -11,6 +11,101 @@ enum MeasuredDepthPreprocessor {
         )
     }
 
+    struct FaceDepthLayer: Equatable {
+        var mask: [Bool]
+        /// 顔層より完全に奥にあるとして除外した画素数。
+        var removedBehindPixelCount: Int
+    }
+
+    /// 顔マスク内の実測画素を深度の連続性で連結成分に分け、最大成分（顔面）より
+    /// 「完全に奥」にある成分だけをマスクから外す。
+    ///
+    /// 前景マスク（追跡器の投影や画像 ROI 由来）は実際の顔輪郭より数 px はみ出し、その画素は
+    /// 顔の後方（壁など、実測で +40〜60cm）を測っている。この背景点は TSDF の領域推定を
+    /// 数十 cm 広げてボクセルを粗くし（実測 1.5mm → 2.43mm）、ICP にも入る。
+    /// 顔より手前の成分（前髪など）や、奥行きが顔層と重なる成分は残す。
+    /// 輪郭の判定は深度の段差のみで行い、顔形状テンプレートは使わない。
+    static func faceDepthLayer(depth: [Float],
+                               mask: [Bool],
+                               width: Int,
+                               height: Int,
+                               maximumDepth: Float,
+                               jumpMeters: Float) -> FaceDepthLayer {
+        let count = width * height
+        guard width > 0, height > 0, depth.count == count, mask.count == count,
+              jumpMeters.isFinite, jumpMeters > 0 else {
+            return FaceDepthLayer(mask: mask, removedBehindPixelCount: 0)
+        }
+        var parent = [Int32](repeating: -1, count: count)
+        depth.withUnsafeBufferPointer { d in
+            mask.withUnsafeBufferPointer { m in
+                parent.withUnsafeMutableBufferPointer { p in
+                    func isMeasured(_ i: Int) -> Bool {
+                        m[i] && d[i].isFinite && d[i] > 0 && d[i] < maximumDepth
+                    }
+                    func find(_ i: Int) -> Int {
+                        var root = i
+                        while Int(p[root]) != root { root = Int(p[root]) }
+                        var node = i
+                        while Int(p[node]) != root {
+                            let next = Int(p[node])
+                            p[node] = Int32(root)
+                            node = next
+                        }
+                        return root
+                    }
+                    func union(_ a: Int, _ b: Int) {
+                        let ra = find(a), rb = find(b)
+                        if ra != rb { p[max(ra, rb)] = Int32(min(ra, rb)) }
+                    }
+                    for i in 0..<count where isMeasured(i) { p[i] = Int32(i) }
+                    for y in 0..<height {
+                        for x in 0..<width {
+                            let i = y * width + x
+                            guard p[i] >= 0 else { continue }
+                            if x + 1 < width, p[i + 1] >= 0, abs(d[i + 1] - d[i]) <= jumpMeters {
+                                union(i, i + 1)
+                            }
+                            if y + 1 < height, p[i + width] >= 0, abs(d[i + width] - d[i]) <= jumpMeters {
+                                union(i, i + width)
+                            }
+                        }
+                    }
+                    for i in 0..<count where p[i] >= 0 { p[i] = Int32(find(i)) }
+                }
+            }
+        }
+
+        var sizes: [Int32: Int] = [:]
+        var minimumDepth: [Int32: Float] = [:]
+        var maximumDepthByRoot: [Int32: Float] = [:]
+        for i in 0..<count where parent[i] >= 0 {
+            let root = parent[i]
+            sizes[root, default: 0] += 1
+            minimumDepth[root] = min(minimumDepth[root] ?? .infinity, depth[i])
+            maximumDepthByRoot[root] = max(maximumDepthByRoot[root] ?? -.infinity, depth[i])
+        }
+        // 同数の場合は root 番号の小さい方を選び、入力だけで結果が決まるようにする。
+        guard let main = sizes.max(by: { lhs, rhs in
+            lhs.value != rhs.value ? lhs.value < rhs.value : lhs.key > rhs.key
+        })?.key, let mainMaximum = maximumDepthByRoot[main] else {
+            return FaceDepthLayer(mask: mask, removedBehindPixelCount: 0)
+        }
+        let behind = Set(minimumDepth.compactMap { root, minimum in
+            minimum > mainMaximum ? root : nil
+        })
+        guard !behind.isEmpty else {
+            return FaceDepthLayer(mask: mask, removedBehindPixelCount: 0)
+        }
+        var out = mask
+        var removed = 0
+        for i in 0..<count where parent[i] >= 0 && behind.contains(parent[i]) {
+            out[i] = false
+            removed += 1
+        }
+        return FaceDepthLayer(mask: out, removedBehindPixelCount: removed)
+    }
+
     static func preprocessedDepth(_ depth: [Float],
                                   mask: [Bool],
                                   width: Int,

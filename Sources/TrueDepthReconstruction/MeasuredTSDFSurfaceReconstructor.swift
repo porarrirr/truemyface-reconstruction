@@ -49,8 +49,40 @@ enum MeasuredTSDFSurfaceReconstructor {
         var surfacePointsOutsideGrid: Int
     }
 
+    /// 融合済み TSDF 場（正規化 SDF、+ が観測面より手前＝カメラ側）。
+    /// 円筒グリッドの各ビンで表面位置を直接求めるために保持する。
+    struct Field {
+        var values: [Float]
+        var valid: [Bool]
+        var dims: SIMD3<Int>
+        var origin: SIMD3<Float>
+        var voxel: Float
+
+        /// 三線形補間。8 隅すべてが観測済みのときだけ値を返す（未観測を補間で作らない）。
+        func sample(_ p: SIMD3<Float>) -> Float? {
+            let g = (p - origin) / voxel
+            guard g.x >= 0, g.y >= 0, g.z >= 0 else { return nil }
+            let x0 = Int(g.x), y0 = Int(g.y), z0 = Int(g.z)
+            guard x0 + 1 < dims.x, y0 + 1 < dims.y, z0 + 1 < dims.z else { return nil }
+            let fx = g.x - Float(x0), fy = g.y - Float(y0), fz = g.z - Float(z0)
+            var result: Float = 0
+            for dz in 0...1 {
+                for dy in 0...1 {
+                    for dx in 0...1 {
+                        let index = ((z0 + dz) * dims.y + (y0 + dy)) * dims.x + (x0 + dx)
+                        guard valid[index] else { return nil }
+                        let w = (dx == 0 ? 1 - fx : fx) * (dy == 0 ? 1 - fy : fy) * (dz == 0 ? 1 - fz : fz)
+                        result += w * values[index]
+                    }
+                }
+            }
+            return result
+        }
+    }
+
     struct Result {
         var mesh: FaceMesh
+        var field: Field
         var validVoxelCount: Int
         var rawVertexCount: Int
         var componentCount: Int
@@ -140,6 +172,7 @@ enum MeasuredTSDFSurfaceReconstructor {
 
         return Result(
             mesh: mesh,
+            field: Field(values: field, valid: valid, dims: dims, origin: origin, voxel: voxel),
             validVoxelCount: validVoxelCount,
             rawVertexCount: rawVertexCount,
             componentCount: firstLargest.count,

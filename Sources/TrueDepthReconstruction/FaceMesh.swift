@@ -45,7 +45,7 @@ extension FaceMesh {
             adj[a] += [b, c]; adj[b] += [a, c]; adj[c] += [a, b]
             i += 3
         }
-        adj = adj.map { Array(Set($0)) }
+        adj = adj.map { Array(Set($0)).sorted() }
 
         func laplacianPass(_ verts: [SIMD3<Float>], _ factor: Float) -> [SIMD3<Float>] {
             var next = verts

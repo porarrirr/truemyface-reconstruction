@@ -22,15 +22,19 @@ Directly combining depth clouds can leave multiple nearby shells. This pipeline 
 
 Each frame contributes at most one vote per voxel. Sampling checks the facial mask, depth discontinuities, and original measurement support. Inpainted depth can aid preprocessing/registration but does not independently establish TSDF observation support. Grid bounds come from corrected measured points, with percentile outlier rejection and physical margins.
 
+Before any of this, each frame's foreground mask is split into depth-continuous components (adjacent pixels within 2 cm). Components lying entirely behind the largest one, typically background seen through pixels where the mask overshoots the face outline, are removed so they cannot inflate the TSDF bounds (and coarsen the voxel) or enter ICP. Components in front of the face or overlapping its depth range are kept; the decision uses depth discontinuities only.
+
 ### 3. Cylindrical surface reconstruction
 
 The TSDF surface is mapped to a data-derived vertical cylinder and aggregated in `(θ, y)` bins. Robust radial statistics, diffusion with fill-depth tracking, bilateral grid smoothing, mask morphology, and connected-region selection produce a regular surface grid. Interior gaps are filled only where a finite inferred radius exists; an outer facial boundary remains open.
+
+Marching-cubes vertices are only voxel-spaced, so aggregation alone leaves many fine bins to be interpolated. Bins within two fill rings of aggregated surface points therefore take their radius directly from the fused field: a radial ray at the bin's `(θ, y)` is marched ±2 voxels around the aggregated radius, trilinearly sampling only fully observed voxels, and the inside-to-outside zero crossing nearest that radius is used. Bins without a crossing are refilled by diffusion; distant floaters outside the search window are ignored.
 
 The grid is directly triangulated, then cleaned with largest-component selection, Taubin smoothing, and vertex clustering when needed. This is a front facial surface, not a watertight full head.
 
 ### 4. GPU work where it matters
 
-Metal kernels implement mask erosion, iterative depth preprocessing, calibrated deprojection, grid diffusion, bilateral grid smoothing, and mask morphology. ICP and TSDF integration run on the CPU. GPU initialization, allocation, encoding, and execution failures are surfaced as errors; the implementation does not silently substitute a template face.
+Metal kernels implement mask erosion, iterative depth preprocessing, calibrated deprojection, grid diffusion, bilateral grid smoothing, and mask morphology. ICP, TSDF integration, depth-layer isolation, and radial field sampling run on the CPU. GPU initialization, allocation, encoding, and execution failures are surfaced as errors; the implementation does not silently substitute a template face.
 
 ### 5. Calibration-aware geometry
 
@@ -47,13 +51,16 @@ No ARKit face vertices, canonical mesh, blend-shape geometry, or face-shape prio
 ```mermaid
 flowchart TD
     S[iOS front TrueDepth capture + image-derived ROI + rigid pose] --> A[Measured depth + foreground masks + intrinsics + rigid poses]
-    A --> B[Metal mask erosion and depth preprocessing]
+    A --> L[Face depth-layer isolation]
+    L --> B[Metal mask erosion and depth preprocessing]
     B --> C[Calibrated depth deprojection]
     C --> D[Robust multiscale point-to-plane ICP]
     D --> E[Projective TSDF with measured support]
     E --> F[Marching-cubes zero crossing]
     F --> G[Cylindrical radial aggregation]
-    G --> H[Diffusion + bilateral smoothing + mask cleanup]
+    G --> R[Radial TSDF zero-crossing sampling]
+    E -. fused field .-> R
+    R --> H[Diffusion + bilateral smoothing + mask cleanup]
     H --> I[Triangulation + component selection + Taubin smoothing]
     I --> J[Vertices in meters + triangle indices]
 ```
@@ -78,7 +85,7 @@ swift run -c release reconstruct-synthetic /tmp/synthetic-ellipsoid.obj
 
 The demo analytically intersects camera rays with an ellipsoid, creates three synthetic depth frames in memory, and runs the full pipeline with the default reconstruction settings. It writes an OBJ only when an output path is provided. No camera access or downloaded data is involved.
 
-Release optimization is recommended for reconstruction. A reference local run produced **43,470 vertices / 86,119 triangles**, using a **1.5 mm TSDF voxel**. These are synthetic-demo results, not an accuracy or speed benchmark; counts may vary with floating-point/toolchain differences.
+Release optimization is recommended for reconstruction. A reference local run produced **43,307 vertices / 85,797 triangles**, using a **1.5 mm TSDF voxel**. These are synthetic-demo results, not an accuracy or speed benchmark; counts may vary with floating-point/toolchain differences.
 
 ## Run the camera-to-mesh sample on iPhone
 
