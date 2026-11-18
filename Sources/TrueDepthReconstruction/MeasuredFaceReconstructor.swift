@@ -1,8 +1,9 @@
 import Foundation
 import simd
 
-/// Measured depth -> Metal preprocessing -> robust multiscale point-to-plane ICP
-/// -> projective TSDF -> marching cubes -> cylindrical remeshing -> mesh cleanup.
+/// Measured depth -> face depth-layer isolation -> Metal preprocessing
+/// -> robust multiscale point-to-plane ICP -> projective TSDF -> marching cubes
+/// -> cylindrical remeshing with radial TSDF zero-crossing sampling -> mesh cleanup.
 /// Pose supplies rigid registration only. No tracking/template facial geometry is used.
 enum MeasuredFaceReconstructor {
     struct Diagnostics: Equatable {
@@ -13,6 +14,10 @@ enum MeasuredFaceReconstructor {
         var gridColumns: Int
         var gridRows: Int
         var measuredBinCount: Int
+        /// Bins whose radius was taken directly from the TSDF field zero crossing.
+        var fieldSampledBinCount: Int
+        /// Mask pixels removed because their depth layer lies entirely behind the face.
+        var backgroundLayerPixelsRemoved: Int
         var tsdfFrontCropInputMinimumZ: Float
         var tsdfFrontCropInputMaximumZ: Float
         var tsdfFrontCropReferenceZ: Float
@@ -38,6 +43,10 @@ enum MeasuredFaceReconstructor {
     struct Configuration {
         /// 顔マスク erosion 回数（マスク縁の飛び画素対策）。
         var maskErosionIterations: Int = 2
+        /// 顔マスク内の深度層分離で「連続」とみなす隣接画素の深度差（メートル）。
+        /// 実測: 顔内部の隣接差は段差部でも 2cm 未満、背景は顔より +40cm 以上奥。
+        /// 除外は顔層より完全に奥の成分に限るため、1〜2cm の範囲で結果は変わらない。
+        var depthLayerJumpMeters: Float = 0.02
         /// 無効画素インペイントの最大反復。
         var inpaintIterations: Int = 25
         /// バイラテラル深度平滑化の range σ（メートル）。
@@ -60,6 +69,9 @@ enum MeasuredFaceReconstructor {
         var binBandWidth: Float = 0.0015
         /// 拡散充填で許容する充填リング数（これより深い外挿ビンは捨てる）。
         var maximumFillDepth: Int = 12
+        /// TSDF 場から半径を直接求めるビンの、表面点集約からの充填深さ上限。
+        /// 表面点間隔（≈1.5mm）で空く 1〜2 ビンを覆い、表面点から遠い外挿域は走査しない。
+        var surfaceSearchFillDepth: Int = 2
         /// 半径グリッドのエッジ保存平滑化: 反復・空間半径（ビン）・空間σ・値域σ（メートル）。
         /// 値域σ 1.2mm が唇の段差を保護するため、空間半径を広げてもエッジは残る。
         var gridSmoothIterations: Int = 2
@@ -84,9 +96,25 @@ enum MeasuredFaceReconstructor {
         guard !keyframes.isEmpty else { return nil }
         // 1. 深度前処理
         var frames = keyframes
+        var backgroundLayerPixelsRemoved = 0
         for i in frames.indices {
             var mask = frames[i].faceMask
             if mask.count == frames[i].width * frames[i].height {
+                // 前景マスクのはみ出し画素が測る背景（顔より完全に奥の深度層）を、
+                // 実測支持・erosion・インペイントより前に外す。
+                let layer = MeasuredDepthPreprocessor.faceDepthLayer(
+                    depth: frames[i].depthValues,
+                    mask: mask,
+                    width: frames[i].width,
+                    height: frames[i].height,
+                    maximumDepth: 1.5,
+                    jumpMeters: configuration.depthLayerJumpMeters
+                )
+                mask = layer.mask
+                backgroundLayerPixelsRemoved += layer.removedBehindPixelCount
+                if let support = frames[i].measuredDepthSupport, support.count == mask.count {
+                    frames[i].measuredDepthSupport = zip(support, mask).map { $0 && $1 }
+                }
                 mask = try MeasuredDepthPreprocessor.erodedMask(
                     mask,
                     width: frames[i].width,
@@ -132,7 +160,8 @@ enum MeasuredFaceReconstructor {
         guard collapsed.count > 2_000 else { return nil }
 
         // 4. 円筒フュージョン → グリッドメッシュ
-        guard let fused = try cylindricalMesh(points: collapsed, configuration: configuration) else {
+        guard let fused = try cylindricalMesh(points: collapsed, configuration: configuration,
+                                              surfaceField: tsdfSurface.field) else {
             return nil
         }
 
@@ -158,6 +187,8 @@ enum MeasuredFaceReconstructor {
             gridColumns: fused.columns,
             gridRows: fused.rows,
             measuredBinCount: fused.measuredBins,
+            fieldSampledBinCount: fused.fieldSampledBins,
+            backgroundLayerPixelsRemoved: backgroundLayerPixelsRemoved,
             tsdfFrontCropInputMinimumZ: tsdfSurface.frontCropDiagnostics.inputMinimumZ,
             tsdfFrontCropInputMaximumZ: tsdfSurface.frontCropDiagnostics.inputMaximumZ,
             tsdfFrontCropReferenceZ: tsdfSurface.frontCropDiagnostics.frontReferenceZ,
@@ -801,10 +832,70 @@ enum MeasuredFaceReconstructor {
         var columns: Int
         var rows: Int
         var measuredBins: Int
+        /// TSDF 場の zero crossing から半径を直接求めたビン数（場を与えない場合は 0）。
+        var fieldSampledBins: Int
     }
 
+    /// 各ビンの頂点位置 (θ, y) から放射方向へ TSDF 場を走査し、事前半径に最も近い
+    /// 内→外（− → +）の zero crossing を返す。見つからないビンは NaN（後段で充填）。
+    /// 事前半径は表面点のビン集約＋拡散充填で、浮遊片・クロップ外の面を拾わないよう
+    /// 探索は事前半径 ±2 ボクセルに限定し、表面点から遠いビンは走査しない。
+    static func fieldSampledRadii(prior: [Float],
+                                  fillDepth: [Int],
+                                  frame: CylindricalFaceFrame,
+                                  field: MeasuredTSDFSurfaceReconstructor.Field,
+                                  maximumPriorFillDepth: Int) -> [Float] {
+        let search = 2 * field.voxel
+        let step = field.voxel / 4
+        let steps = Int((2 * search / step).rounded(.up))
+        var out = [Float](repeating: .nan, count: prior.count)
+        let chunkSize = 1024
+        let chunkCount = (prior.count + chunkSize - 1) / chunkSize
+        out.withUnsafeMutableBufferPointer { outPtr in
+            DispatchQueue.concurrentPerform(iterations: chunkCount) { chunk in
+                let lower = chunk * chunkSize
+                let upper = min(prior.count, lower + chunkSize)
+                for i in lower..<upper {
+                    let r0 = prior[i]
+                    guard r0.isFinite, fillDepth[i] >= 0, fillDepth[i] <= maximumPriorFillDepth else { continue }
+                    let theta = frame.binTheta(i)
+                    let y = frame.binY(i)
+                    let s = sinf(theta), c = cosf(theta)
+                    func point(_ r: Float) -> SIMD3<Float> {
+                        SIMD3<Float>(frame.axisX + r * s, y, frame.axisZ + r * c)
+                    }
+                    var best: Float = .nan
+                    var bestDistance = Float.infinity
+                    var previousR = r0 - search
+                    var previous = field.sample(point(previousR))
+                    for k in 1...steps {
+                        let r = r0 - search + Float(k) * step
+                        let value = field.sample(point(r))
+                        if let p = previous, let v = value, p <= 0, v > 0 {
+                            let crossing = previousR + (r - previousR) * (-p / (v - p))
+                            let distance = abs(crossing - r0)
+                            if distance < bestDistance {
+                                bestDistance = distance
+                                best = crossing
+                            }
+                        }
+                        previousR = r
+                        previous = value
+                    }
+                    outPtr[i] = best
+                }
+            }
+        }
+        return out
+    }
+
+    /// - Parameter surfaceField: 与えた場合、表面点の近傍ビン（充填深さ ≤ surfaceSearchFillDepth）は
+    ///   ビン集約値ではなく、頂点位置の放射方向レイと TSDF 場の zero crossing から半径を直接求める。
+    ///   表面点はボクセル間隔（≈1.5mm）でしか存在せず、約 1mm のビンの過半が空になるため、
+    ///   集約だけでは最終頂点の大半が拡散充填の補間値になる（実測: 実測ビン 39〜42%）。
     static func cylindricalMesh(points: [SIMD3<Float>],
-                                configuration: Configuration) throws -> CylindricalFusionResult? {
+                                configuration: Configuration,
+                                surfaceField: MeasuredTSDFSurfaceReconstructor.Field? = nil) throws -> CylindricalFusionResult? {
         guard points.count > 100 else { return nil }
         guard let cylindrical = CylindricalFaceFrame.samples(
             points: points,
@@ -856,7 +947,23 @@ enum MeasuredFaceReconstructor {
             maxIterations: 40
         )
         grid = filled.grid
-        let fillDepth = filled.fillDepth
+        var fillDepth = filled.fillDepth
+        var fieldSampledBins = 0
+        if let surfaceField {
+            let sampled = Self.fieldSampledRadii(
+                prior: grid, fillDepth: fillDepth, frame: frame,
+                field: surfaceField, maximumPriorFillDepth: configuration.surfaceSearchFillDepth)
+            fieldSampledBins = sampled.reduce(0) { $0 + ($1.isFinite ? 1 : 0) }
+            guard fieldSampledBins > 500 else { return nil }
+            let refilled = try MeasuredCylindricalGridProcessor.diffusedFill(
+                sampled,
+                columns: columns,
+                rows: rows,
+                maxIterations: 40
+            )
+            grid = refilled.grid
+            fillDepth = refilled.fillDepth
+        }
 
         // エッジ保存平滑化（残留テラスの除去）
         grid = try MeasuredCylindricalGridProcessor.smoothedGrid(
@@ -919,7 +1026,8 @@ enum MeasuredFaceReconstructor {
             ),
             columns: columns,
             rows: rows,
-            measuredBins: measuredBins
+            measuredBins: measuredBins,
+            fieldSampledBins: fieldSampledBins
         )
     }
 
